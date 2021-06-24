@@ -8,7 +8,15 @@ def use_puppet4?
 end
 
 def use_puppet5?
-  (ENV['PUPPET_INSTALL_VERSION'] =~ %r{(^2017|^2018)}) ? true : false
+  (ENV['BEAKER_PUPPET_COLLECTION'] =~ %r{^puppet5}) ? true : false
+end
+
+def use_puppet6?
+  (ENV['BEAKER_PUPPET_COLLECTION'] =~ %r{^puppet6}) ? true : false
+end
+
+def use_puppet7?
+  (ENV['BEAKER_PUPPET_COLLECTION'] =~ %r{^puppet7}) ? true : false
 end
 
 def build_url(platform)
@@ -30,12 +38,21 @@ def build_url(platform)
     else
       raise "build_url() called with unsupported platform '#{platform}'"
     end
-  else
+  elsif use_puppet6?
     url6 = 'http://%{mngr}.puppetlabs.com/%{dir}puppet6-release%{plat}'
     case platform
     when 'el' then url6 % { mngr: 'yum', dir: 'puppet6/', plat: '-el-' }
     when 'fedora' then url6 % { mngr: 'yum', dir: 'puppet6/', plat: '-fedora-' }
     when 'debian', 'ubuntu' then url6 % { mngr: 'apt', dir: '', plat: '-' }
+    else
+      raise "build_url() called with unsupported platform '#{platform}'"
+    end
+  else
+    url7 = 'http://%{mngr}.puppetlabs.com/%{dir}puppet7-release%{plat}'
+    case platform
+    when 'el' then url7 % { mngr: 'yum', dir: 'puppet7/', plat: '-el-' }
+    when 'fedora' then url7 % { mngr: 'yum', dir: 'puppet7/', plat: '-fedora-' }
+    when 'debian', 'ubuntu' then url7 % { mngr: 'apt', dir: '', plat: '-' }
     else
       raise "build_url() called with unsupported platform '#{platform}'"
     end
@@ -47,10 +64,19 @@ hosts.each do |host|
     on host, 'echo \'export PATH=/var/lib/gems/1.8/bin/:${PATH}\' >> ~/.bashrc'
   end
   # install_puppet
-  if host['platform'] =~ %r{el-(5|6|7)}
+  if host['platform'] =~ %r{el-(5|6|7|8)}
     relver = Regexp.last_match(1)
     on host, "rpm -ivh #{build_url('el')}#{relver}.noarch.rpm"
     on host, 'yum install -y puppetserver'
+    on host, '/opt/puppetlabs/bin/puppetserver ca setup'
+
+    # TODO: we should probably be using the relatively new postgresql
+    # module settings manage_dnf_module on el8 when we are managing the postgresql
+    # database
+    if relver == '8'
+      on host, 'dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-8-x86_64/pgdg-redhat-repo-latest.noarch.rpm'
+      on host, 'dnf -qy module disable postgresql'
+    end
   elsif host['platform'] =~ %r{fedora-(\d+)}
     relver = Regexp.last_match(1)
     on host, "rpm -ivh #{build_url('fedora')}#{relver}.noarch.rpm"
@@ -73,18 +99,27 @@ hosts.each do |host|
       on host, 'dpkg -i puppetlabs-release-pc1-$(lsb_release -c -s).deb'
     elsif use_puppet5?
       on host, 'dpkg -i puppet5-release-$(lsb_release -c -s).deb'
-    else
+    elsif use_puppet6?
       on host, 'dpkg -i puppet6-release-$(lsb_release -c -s).deb'
+    else
+      on host, 'dpkg -i puppet7-release-$(lsb_release -c -s).deb'
     end
     on host, 'apt-get -y -m update'
     on host, 'apt-get install -y puppetserver'
+    on host, '/opt/puppetlabs/bin/puppetserver ca setup'
   else
     raise "install_puppet() called for unsupported platform '#{host['platform']}' on '#{host.name}'"
   end
 end
 
 opts = { puppet_agent_version: 'latest' }
-opts[:puppet_collection] = use_puppet5? ? 'puppet5' : 'puppet6'
+opts[:puppet_collection] = if use_puppet5?
+                             'puppet5'
+                           elsif use_puppet6?
+                             'puppet6'
+                           elsif use_puppet7?
+                             'puppet7'
+                           end
 install_puppet_agent_on(hosts, opts) unless ENV['BEAKER_provision'] == 'no'
 install_ca_certs unless ENV['PUPPET_INSTALL_TYPE'] =~ %r{pe}i
 install_module_on(hosts)

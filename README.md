@@ -85,6 +85,7 @@ your manifest will look like:
     node <hostname> {
       # Configure puppetdb and its underlying database
       class { 'puppetdb': }
+      
       # Configure the Puppet master to use puppetdb
       class { 'puppetdb::master::config': }
     }
@@ -132,6 +133,55 @@ scenario might look like:
 This should be all it takes to get a 3-node, distributed installation of
 PuppetDB up and running. Note that, if you prefer, you could easily move two of
 these classes to a single node and end up with a 2-node setup instead.
+
+### Enable SSL connections
+
+To use SSL connections for the single node setup, use the following manifest:
+
+    node <hostname> {
+      # Here we configure puppetdb and PostgreSQL to use ssl connections
+      class { 'puppetdb':
+        postgresql_ssl_on => true,
+        database_host => '<hostname>',
+        database_listen_address => '0.0.0.0'
+      }
+      
+      # Configure the Puppet master to use puppetdb
+      class { 'puppetdb::master::config': }
+
+To use SSL connections for the multiple nodes setup, use the following manifest:
+
+    $puppetdb_host = 'puppetdb.example.lan'
+    $postgres_host = 'postgres.example.lan'
+
+    node 'master.example.lan' {
+      # Here we configure the Puppet master to use PuppetDB,
+      # telling it the hostname of the PuppetDB node.
+      class { 'puppetdb::master::config':
+        puppetdb_server => $puppetdb_host,
+      }
+    }
+
+    node 'postgres.example.lan' {
+      # Here we install and configure PostgreSQL and the PuppetDB
+      # database instance, and tell PostgreSQL that it should
+      # listen for connections to the `$postgres_host`. 
+      # We also enable SSL connections.
+      class { 'puppetdb::database::postgresql':
+        listen_addresses => $postgres_host,
+        postgresql_ssl_on => true,
+        puppetdb_server => $puppetdb_host
+      }
+    }
+
+    node 'puppetdb.example.lan' {
+      # Here we install and configure PuppetDB, and tell it where to
+      # find the PostgreSQL database. We also enable SSL connections.
+      class { 'puppetdb::server':
+        database_host => $postgres_host,
+        postgresql_ssl_on => true
+      }
+    }
 
 ### Beginning with PuppetDB
 
@@ -360,6 +410,11 @@ If true, open the `ssl_listen_port` on the firewall. Defaults to `undef`.
 
 Specify the supported SSL protocols for PuppetDB (e.g. TLSv1, TLSv1.1, TLSv1.2.)
 
+### `postgresql_ssl_on`
+
+If `true`, it configures SSL connections between PuppetDB and the PostgreSQL database.
+Defaults to `false`.
+
 #### `cipher_suites`
 
 Configure jetty's supported `cipher-suites` (e.g. `SSL_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384`).
@@ -442,19 +497,20 @@ settings and fail if it is not able to do so. Defaults to `true`.
 #### `node_ttl`
 
 The length of time a node can go without receiving any new data before it's
-automatically deactivated. (defaults to '0', which disables auto-deactivation).
-This option is supported in PuppetDB >= 1.1.0.
+automatically deactivated. (defaults to '7d', which is a 7-day period. Set to
+'0d' to disable auto-deactivation).  This option is supported in PuppetDB >=
+1.1.0.
 
 #### `node_purge_ttl`
 
 The length of time a node can be deactivated before it's deleted from the
-database. (defaults to '0', which disables purging). This option is supported in
-PuppetDB >= 1.2.0.
+database. (defaults to '14d', which is a 14-day period. Set to '0d' to disable
+purging). This option is supported in PuppetDB >= 1.2.0.
 
 #### `report_ttl`
 
 The length of time reports should be stored before being deleted. (defaults to
-`7d`, which is a 7-day period). This option is supported in PuppetDB >= 1.1.0.
+`14d`, which is a 14-day period). This option is supported in PuppetDB >= 1.1.0.
 
 #### `gc_interval`
 
@@ -522,7 +578,7 @@ The parent directory for the MQ's data directory.
 
 Java VM options used for overriding default Java VM options specified in
 PuppetDB package. Defaults to `{}`. See
-[PuppetDB Configuration](http://docs.puppetlabs.com/puppetdb/1.1/configure.html)
+[PuppetDB Configuration](https://puppet.com/docs/puppetdb/latest/configure.html)
 to get more details about the current defaults.
 
 For example, to set `-Xmx512m -Xms256m` options use:
@@ -550,25 +606,26 @@ Which database backend to use for the read database. Only supports
 `postgres` (default). This option is supported in PuppetDB >= 1.6.
 
 #### `read_database_host`
-*This parameter must be set to enable the PuppetDB read-database.*
+*This parameter must be set to use another PuppetDB instance for queries.*
 
-The hostname or IP address of the read database server. Defaults to `undef`.
-The default is to use the regular database for reads and writes. This option is
-supported in PuppetDB >= 1.6.
+The hostname or IP address of the read database server. If set to `undef`, and 
+`manage_database` is set to `true`, it will use the value of the `database_host` 
+parameter. This option is supported in PuppetDB >= 1.6.
 
 #### `read_database_port`
 
-The port that the read database server listens on. Defaults to `5432`. This
-option is supported in PuppetDB >= 1.6.
+The port that the read database server listens on. If `read_database_host`
+is set to `undef`, and `manage_database` is set to `true`, it will use the value of 
+the `database_port` parameter. This option is supported in PuppetDB >= 1.6.
 
 #### `read_database_username`
 
-The name of the read database user to connect as. Defaults to `puppetdb`. This
+The name of the read database user to connect as. Defaults to `puppetdb-read`. This
 option is supported in PuppetDB >= 1.6.
 
 #### `read_database_password`
 
-The password for the read database user. Defaults to `puppetdb`. This option is
+The password for the read database user. Defaults to `puppetdb-read`. This option is
 supported in PuppetDB >= 1.6.
 
 #### `manage_read_db_password`
@@ -579,8 +636,9 @@ Defaults to `true`
 
 #### `read_database_name`
 
-The name of the read database instance to connect to. Defaults to `puppetdb`.
-This option is supported in PuppetDB >= 1.6.
+The name of the read database instance to connect to. If `read_database_host`
+is set to `undef`, and `manage_database` is set to `true`, it will use the value of
+the `database_name` parameter. This option is supported in PuppetDB >= 1.6.
 
 #### `read_log_slow_statements`
 

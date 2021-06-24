@@ -12,12 +12,14 @@ class puppetdb::server (
   Boolean $ssl_set_cert_paths              = $puppetdb::params::ssl_set_cert_paths,
   Stdlib::Absolutepath $ssl_cert_path      = $puppetdb::params::ssl_cert_path,
   Stdlib::Absolutepath $ssl_key_path       = $puppetdb::params::ssl_key_path,
+  Stdlib::Absolutepath $ssl_key_pk8_path   = $puppetdb::params::ssl_key_pk8_path,
   Stdlib::Absolutepath $ssl_ca_cert_path   = $puppetdb::params::ssl_ca_cert_path,
   Boolean $ssl_deploy_certs                = $puppetdb::params::ssl_deploy_certs,
   $ssl_key                                 = $puppetdb::params::ssl_key,
   $ssl_cert                                = $puppetdb::params::ssl_cert,
   $ssl_ca_cert                             = $puppetdb::params::ssl_ca_cert,
   $ssl_protocols                           = $puppetdb::params::ssl_protocols,
+  $postgresql_ssl_on                       = $puppetdb::params::postgresql_ssl_on,
   $cipher_suites                           = $puppetdb::params::cipher_suites,
   $migrate                                 = $puppetdb::params::migrate,
   $database                                = $puppetdb::params::database,
@@ -61,6 +63,7 @@ class puppetdb::server (
   $confdir                                 = $puppetdb::params::confdir,
   $vardir                                  = $puppetdb::params::vardir,
   $manage_firewall                         = $puppetdb::params::manage_firewall,
+  $manage_database                         = $puppetdb::params::manage_database,
   $java_args                               = $puppetdb::params::java_args,
   $merge_default_java_args                 = $puppetdb::params::merge_default_java_args,
   $max_threads                             = $puppetdb::params::max_threads,
@@ -168,6 +171,10 @@ class puppetdb::server (
     database_password         => $database_password,
     database_name             => $database_name,
     manage_db_password        => $manage_db_password,
+    postgresql_ssl_on         => $postgresql_ssl_on,
+    ssl_key_pk8_path          => $ssl_key_pk8_path,
+    ssl_cert_path             => $ssl_cert_path,
+    ssl_ca_cert_path          => $ssl_ca_cert_path,
     database_max_pool_size    => $database_max_pool_size,
     jdbc_ssl_properties       => $jdbc_ssl_properties,
     database_validate         => $database_validate,
@@ -189,14 +196,28 @@ class puppetdb::server (
     notify                    => Service[$puppetdb_service],
   }
 
+  if $manage_database and $read_database_host == undef {
+    $real_database_host = $database_host
+    $real_database_port = $database_port
+    $real_database_name = $database_name
+  } else {
+    $real_database_host =  $read_database_host
+    $real_database_port =  $read_database_port
+    $real_database_name =  $read_database_name
+  }
+
   class { 'puppetdb::server::read_database':
-    database               => $read_database,
-    database_host          => $read_database_host,
-    database_port          => $read_database_port,
-    database_username      => $read_database_username,
-    database_password      => $read_database_password,
-    database_name          => $read_database_name,
+    read_database          => $read_database,
+    read_database_host     => $real_database_host,
+    read_database_port     => $real_database_port,
+    read_database_username => $read_database_username,
+    read_database_password => $read_database_password,
+    read_database_name     => $real_database_name,
     manage_db_password     => $manage_read_db_password,
+    postgresql_ssl_on      => $postgresql_ssl_on,
+    ssl_key_pk8_path       => $ssl_key_pk8_path,
+    ssl_cert_path          => $ssl_cert_path,
+    ssl_ca_cert_path       => $ssl_ca_cert_path,
     jdbc_ssl_properties    => $read_database_jdbc_ssl_properties,
     database_validate      => $read_database_validate,
     log_slow_statements    => $read_log_slow_statements,
@@ -238,6 +259,26 @@ class puppetdb::server (
         group   => $puppetdb_group,
         mode    => '0600',
         notify  => Service[$puppetdb_service];
+    }
+  }
+
+  if $postgresql_ssl_on {
+    exec { $ssl_key_pk8_path:
+      path    => [ '/opt/puppetlabs/puppet/bin', $facts['path'] ],
+      command => "openssl pkcs8 -topk8 -inform PEM -outform DER -in ${ssl_key_path} -out ${ssl_key_pk8_path} -nocrypt",
+      # Generate a .pk8 key if one doesn't exist or is older than the .pem input.
+      # NOTE: bash file time checks, like -ot, can't always discern sub-second
+      # differences.
+      onlyif  => "test ! -e '${ssl_key_pk8_path}' -o '${ssl_key_pk8_path}' -ot '${ssl_key_path}'",
+      before  => File[$ssl_key_pk8_path]
+    }
+
+    file { $ssl_key_pk8_path:
+      ensure => present,
+      owner  => $puppetdb_user,
+      group  => $puppetdb_group,
+      mode   => '0600',
+      notify => Service[$puppetdb_service]
     }
   }
 
@@ -300,7 +341,7 @@ class puppetdb::server (
 
   # java binary path for PuppetDB. If undef, default will be used.
   if $java_bin {
-    ini_setting{'java':
+    ini_setting { 'java':
       ensure  => 'present',
       section => '',
       path    => $puppetdb::params::puppetdb_initconf,
@@ -315,7 +356,7 @@ class puppetdb::server (
     if $facts['systemd'] {
       # deploy a systemd timer + service to cleanup old reports
       # https://puppet.com/docs/puppetdb/5.2/maintain_and_tune.html#clean-up-the-dead-letter-office
-      systemd::unit_file{'puppetdb-dlo-cleanup.service':
+      systemd::unit_file { 'puppetdb-dlo-cleanup.service':
         content => epp("${module_name}/puppetdb-DLO-cleanup.service.epp", {
           'puppetdb_user'  => $puppetdb_user,
           'puppetdb_group' => $puppetdb_group,
@@ -323,8 +364,8 @@ class puppetdb::server (
           'dlo_max_age'    => $dlo_max_age
         }),
       }
-      -> systemd::unit_file{'puppetdb-dlo-cleanup.timer':
-        content => epp("${module_name}/puppetdb-DLO-cleanup.timer.epp", {'cleanup_timer_interval' => $cleanup_timer_interval}),
+      -> systemd::unit_file { 'puppetdb-dlo-cleanup.timer':
+        content => epp("${module_name}/puppetdb-DLO-cleanup.timer.epp", {'cleanup_timer_interval' => $cleanup_timer_interval }),
         enable  => true,
         active  => true,
       }
